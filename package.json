@@ -25,6 +25,8 @@
     "dependencies": {},
     "devDependencies": {
         "@ljharb/eslint-config": "^12.2.1",
+        "@types/node": "^10.9.4",
+        "@types/tape": "^4.2.32",
         "browserify": "^16.2.0",
         "covert": "^1.1.0",
         "editorconfig-tools": "^0.1.1",
