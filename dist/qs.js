@@ -4,21 +4,45 @@
 var replace = String.prototype.replace;
 var percentTwenties = /%20/g;
 
-module.exports = {
-    'default': 'RFC3986',
-    formatters: {
-        RFC1738: function (value) {
-            return replace.call(value, percentTwenties, '+');
-        },
-        RFC3986: function (value) {
-            return value;
-        }
-    },
+var util = require('./utils');
+
+/**
+ * @callback Formatter
+ * @param value {string}
+ * @returns {string}
+ */
+
+/**
+ * @enum {string}
+ * @type {Object.<string, string>}
+ * @readonly
+ */
+var Format = {
     RFC1738: 'RFC1738',
     RFC3986: 'RFC3986'
 };
 
-},{}],2:[function(require,module,exports){
+/** @typedef {Format} Format */
+
+module.exports = util.assign(
+    {
+        'default': /** @type Format */ 'RFC3986',
+        /** @type {Object.<Format, Formatter>} */
+        formatters: {
+            /** @type Formatter */
+            RFC1738: function (value) {
+                return replace.call(value, percentTwenties, '+');
+            },
+            /** @type Formatter */
+            RFC3986: function (value) {
+                return value;
+            }
+        },
+    },
+    Format
+);
+
+},{"./utils":5}],2:[function(require,module,exports){
 'use strict';
 
 var stringify = require('./stringify');
@@ -38,25 +62,132 @@ var utils = require('./utils');
 
 var has = Object.prototype.hasOwnProperty;
 
+/** @typedef {import('./utils').UtilOptions} UtilOptions */
+/** @typedef {import('./utils').Charset} Charset */
+/** @typedef {import('./utils').Decoder} Decoder */
+
+/**
+ * @typedef ParseOptionsInternalType
+ * @property allowPrototypes {boolean}
+ * @property arrayLimit {number}
+ * @property delimiter {string | RegExp}
+ * @property ignoreQueryPrefix {boolean}
+ * @property interpretNumericEntities {boolean | InterpretNumericEntities}
+ * @property parameterLimit {number}
+ * @property strictNullHandling {boolean}
+ * @property charsetSentinel {boolean}
+ * @property decoder {Decoder}
+ * @property depth {number}
+ * @property parseArrays {boolean}
+ *
+ * @typedef {UtilOptions & ParseOptionsInternalType} ParseOptionsInternal
+ */
+
+/**
+ * @typedef ParseOptionsType
+ * @property allowDots= {boolean}
+ * @property allowPrototypes= {boolean}
+ * @property arrayLimit= {number}
+ * @property charset= Charset
+ * @property charsetSentinel= {boolean}
+ * @property decoder= {Decoder}
+ * @property delimiter= {string | RegExp}
+ * @property depth= {number}
+ * @property ignoreQueryPrefix= {boolean}
+ * @property interpretNumericEntities= {boolean | InterpretNumericEntities}
+ * @property parameterLimit= {number}
+ * @property parseArrays= {boolean}
+ * @property plainObjects= {boolean}
+ * @property strictNullHandling= {boolean}
+ *
+ * @typedef {ParseOptionsInternal & ParseOptionsType} ParseOptions
+ */
+
+/**
+ * @callback InterpretNumericEntities
+ * @param str {string}
+ * @returns str
+ */
+
+/** @type {ParseOptions} */
 var defaults = {
     allowDots: false,
     allowPrototypes: false,
     arrayLimit: 20,
+    charset: 'utf-8',
+    charsetSentinel: false,
     decoder: utils.decode,
     delimiter: '&',
     depth: 5,
+    ignoreQueryPrefix: false,
+    interpretNumericEntities: false,
     parameterLimit: 1000,
+    parseArrays: true,
     plainObjects: false,
     strictNullHandling: false
 };
 
+/** @type {InterpretNumericEntities} */
+var interpretNumericEntities = function (str) {
+    return str.replace(
+        /&#(\d+);/g,
+        /**
+         * @param $0 {string}
+         * @param numberStr {string}
+         * @returns {string}
+         */
+        function ($0, numberStr) {
+            return String.fromCharCode(parseInt(numberStr, 10));
+        }
+    );
+};
+
+// This is what browsers will submit when the ✓ character occurs in an
+// application/x-www-form-urlencoded body and the encoding of the page containing
+// the form is iso-8859-1, or when the submitted form has an accept-charset
+// attribute of iso-8859-1. Presumably also with other charsets that do not contain
+// the ✓ character, such as us-ascii.
+var isoSentinel = 'utf8=%26%2310003%3B'; // encodeURIComponent('&#10003;')
+
+// These are the percent-encoded utf-8 octets representing a checkmark, indicating
+// that the request actually is utf-8 encoded.
+var charsetSentinel = 'utf8=%E2%9C%93'; // encodeURIComponent('✓')
+
+/**
+ * @param str {string}
+ * @param options {ParseOptionsInternal}
+ * @returns {object | array}
+ */
 var parseValues = function parseQueryStringValues(str, options) {
     var obj = {};
     var cleanStr = options.ignoreQueryPrefix ? str.replace(/^\?/, '') : str;
     var limit = options.parameterLimit === Infinity ? undefined : options.parameterLimit;
     var parts = cleanStr.split(options.delimiter, limit);
+    var charset = options.charset;
+    var skipIndex = -1; // Keep track of where the utf8 sentinel was found
+    var i;
 
-    for (var i = 0; i < parts.length; ++i) {
+    if (charset !== undefined && charset !== 'utf-8' && charset !== 'iso-8859-1') {
+        throw new Error('The charset option must be either utf-8, iso-8859-1, or undefined');
+    }
+    if (options.charsetSentinel) {
+        for (i = 0; i < parts.length; ++i) {
+            if (parts[i].indexOf('utf8=') === 0) {
+                if (parts[i] === charsetSentinel) {
+                    charset = 'utf-8';
+                } else if (parts[i] === isoSentinel) {
+                    charset = 'iso-8859-1';
+                }
+                skipIndex = i;
+                i = parts.length; // The eslint settings do not allow break;
+            }
+        }
+    }
+
+    for (i = 0; i < parts.length; ++i) {
+        if (i === skipIndex) {
+            continue;
+        }
         var part = parts[i];
 
         var bracketEqualsPos = part.indexOf(']=');
@@ -64,11 +195,15 @@ var parseValues = function parseQueryStringValues(str, options) {
 
         var key, val;
         if (pos === -1) {
-            key = options.decoder(part, defaults.decoder);
+            key = options.decoder(part, defaults.decoder, charset);
             val = options.strictNullHandling ? null : '';
         } else {
-            key = options.decoder(part.slice(0, pos), defaults.decoder);
-            val = options.decoder(part.slice(pos + 1), defaults.decoder);
+            key = options.decoder(part.slice(0, pos), defaults.decoder, charset);
+            val = options.decoder(part.slice(pos + 1), defaults.decoder, charset);
+        }
+
+        if (val && options.interpretNumericEntities && charset === 'iso-8859-1') {
+            val = interpretNumericEntities(val);
         }
         if (has.call(obj, key)) {
             obj[key] = [].concat(obj[key]).concat(val);
@@ -80,6 +215,12 @@ var parseValues = function parseQueryStringValues(str, options) {
     return obj;
 };
 
+/**
+ * @param chain {string[]}
+ * @param val {object=}
+ * @param options {ParseOptionsInternal}
+ * @returns
+ */
 var parseObject = function (chain, val, options) {
     var leaf = val;
 
@@ -87,14 +228,15 @@ var parseObject = function (chain, val, options) {
         var obj;
         var root = chain[i];
 
-        if (root === '[]') {
-            obj = [];
-            obj = obj.concat(leaf);
+        if (root === '[]' && options.parseArrays) {
+            obj = [].concat(leaf);
         } else {
             obj = options.plainObjects ? Object.create(null) : {};
             var cleanRoot = root.charAt(0) === '[' && root.charAt(root.length - 1) === ']' ? root.slice(1, -1) : root;
             var index = parseInt(cleanRoot, 10);
-            if (
+            if (!options.parseArrays && cleanRoot === '') {
+                obj = { 0: leaf };
+            } else if (
                 !isNaN(index)
                 && root !== cleanRoot
                 && String(index) === cleanRoot
@@ -114,6 +256,12 @@ var parseObject = function (chain, val, options) {
     return leaf;
 };
 
+/**
+ * @param givenKey {string=}
+ * @param val {object=}
+ * @param options {ParseOptionsInternal}
+ * @returns {object}
+ */
 var parseKeys = function parseQueryStringKeys(givenKey, val, options) {
     if (!givenKey) {
         return;
@@ -169,6 +317,11 @@ var parseKeys = function parseQueryStringKeys(givenKey, val, options) {
     return parseObject(keys, val, options);
 };
 
+/**
+ * @param str {string}
+ * @param opts {ParseOptions=}
+ * @returns {object | array}
+ */
 module.exports = function (str, opts) {
     var options = opts ? utils.assign({}, opts) : {};
 
@@ -210,9 +363,74 @@ module.exports = function (str, opts) {
 },{"./utils":5}],4:[function(require,module,exports){
 'use strict';
 
+/** @typedef {import('./utils').Charset} Charset */
+/** @typedef {import('./utils').UtilOptions} UtilOptions */
+/** @typedef {import('./formats').Format} Format */
+/** @typedef {import('./formats').Formatter} Formatter */
+/** @typedef {import('./utils').Encoder} Encoder */
+
+/**
+ * @callback arrayPrefixGenerator
+ * @param prefix {string}
+ * @param key {string=}
+ * @returns {string}
+ */
+
+/**
+ * @callback Filter
+ * @param prefix {string}
+ * @param obj<T>
+ * @returns T
+ */
+
+/**
+ * @callback Comparator
+ * @param a {any}
+ * @param b {any}
+ * @returns {number}
+ */
+
+/**
+ * @typedef StringifyOptionsInternalType
+ * @property skipNulls {boolean}
+ * @property serializeDate {DateSerializer}
+ * @property encode {boolean}
+ * @property encoder {Encoder}
+ * @property delimiter {string | RegExp}
+ * @property encodeValuesOnly {boolean}
+ * @property strictNullHandling {boolean}
+ * @property charsetSentinel {boolean}
+ * @property format {Format}
+ *
+ * @typedef {UtilOptions & StringifyOptionsInternalType} StringifyOptionsInternal
+ */
+
+/**
+ * @typedef StringifyOptionsType
+ * @property allowDots= {boolean}
+ * @property skipNulls= {boolean}
+ * @property serializeDate= {DateSerializer}
+ * @property encode= {boolean}
+ * @property encoder= {Encoder}
+ * @property delimiter= {string | RegExp}
+ * @property encodeValuesOnly= {boolean}
+ * @property strictNullHandling= {boolean}
+ * @property charsetSentinel= {boolean}
+ * @property format= {Format}
+ *
+ * @typedef {StringifyOptionsInternal & StringifyOptionsType} StringifyOptions
+ */
+
+/**
+ * @callback DateSerializer
+ * @param date {Date}
+ * @returns {string}
+ */
+
 var utils = require('./utils');
 var formats = require('./formats');
 
+/** @type {Object.<string, arrayPrefixGenerator>} */
 var arrayPrefixGenerators = {
     brackets: function brackets(prefix) { // eslint-disable-line func-name-matching
         return prefix + '[]';
@@ -227,11 +445,18 @@ var arrayPrefixGenerators = {
 
 var toISO = Date.prototype.toISOString;
 
+/** @type StringifyOptions */
 var defaults = {
+    allowDots: false,
+    charsetSentinel: false,
+    charset: 'utf-8',
     delimiter: '&',
     encode: true,
     encoder: utils.encode,
     encodeValuesOnly: false,
+    format: formats['default'],
+    plainObjects: false,
+    /** @type DateSerializer */
     serializeDate: function serializeDate(date) { // eslint-disable-line func-name-matching
         return toISO.call(date);
     },
@@ -240,18 +465,22 @@ var defaults = {
 };
 
 var stringify = function stringify( // eslint-disable-line func-name-matching
+    /**
+     * @type {object | Date | null | undefined | string | number | boolean}
+     */
     object,
-    prefix,
-    generateArrayPrefix,
-    strictNullHandling,
-    skipNulls,
-    encoder,
-    filter,
-    sort,
-    allowDots,
-    serializeDate,
-    formatter,
-    encodeValuesOnly
+    /** @type {string} */ prefix,
+    /** @type {arrayPrefixGenerator} */ generateArrayPrefix,
+    /** @type {boolean} */ strictNullHandling,
+    /** @type {boolean} */ skipNulls,
+    /** @type {Encoder} */ encoder,
+    /** @type {Filter} */ filter,
+    /** @type {Comparator} */ sort,
+    /** @type {boolean} */ allowDots,
+    /** @type {DateSerializer} */ serializeDate,
+    /** @type {Formatter} */ formatter,
+    /** @type {boolean} */ encodeValuesOnly,
+    /** @type {Charset} */ charset
 ) {
     var obj = object;
     if (typeof filter === 'function') {
@@ -260,7 +489,7 @@ var stringify = function stringify( // eslint-disable-line func-name-matching
         obj = serializeDate(obj);
     } else if (obj === null) {
         if (strictNullHandling) {
-            return encoder && !encodeValuesOnly ? encoder(prefix, defaults.encoder) : prefix;
+            return encoder && !encodeValuesOnly ? encoder(prefix, defaults.encoder, charset) : prefix;
         }
 
         obj = '';
@@ -268,12 +497,13 @@ var stringify = function stringify( // eslint-disable-line func-name-matching
 
     if (typeof obj === 'string' || typeof obj === 'number' || typeof obj === 'boolean' || utils.isBuffer(obj)) {
         if (encoder) {
-            var keyValue = encodeValuesOnly ? prefix : encoder(prefix, defaults.encoder);
-            return [formatter(keyValue) + '=' + formatter(encoder(obj, defaults.encoder))];
+            var keyValue = encodeValuesOnly ? prefix : encoder(prefix, defaults.encoder, charset);
+            return [formatter(keyValue) + '=' + formatter(encoder(obj, defaults.encoder, charset))];
         }
         return [formatter(prefix) + '=' + formatter(String(obj))];
     }
 
+    /** @type array */
     var values = [];
 
     if (typeof obj === 'undefined') {
@@ -296,6 +526,7 @@ var stringify = function stringify( // eslint-disable-line func-name-matching
         }
 
         if (Array.isArray(obj)) {
+            /** @type array */
             values = values.concat(stringify(
                 obj[key],
                 generateArrayPrefix(prefix, key),
@@ -308,9 +539,11 @@ var stringify = function stringify( // eslint-disable-line func-name-matching
                 allowDots,
                 serializeDate,
                 formatter,
-                encodeValuesOnly
+                encodeValuesOnly,
+                charset
             ));
         } else {
+            /** @type array */
             values = values.concat(stringify(
                 obj[key],
                 prefix + (allowDots ? '.' + key : '[' + key + ']'),
@@ -323,7 +556,8 @@ var stringify = function stringify( // eslint-disable-line func-name-matching
                 allowDots,
                 serializeDate,
                 formatter,
-                encodeValuesOnly
+                encodeValuesOnly,
+                charset
             ));
         }
     }
@@ -331,6 +565,11 @@ var stringify = function stringify( // eslint-disable-line func-name-matching
     return values;
 };
 
+/**
+ * @param object {object}
+ * @param opts {StringifyOptions=}
+ * @returns string
+ */
 module.exports = function (object, opts) {
     var obj = object;
     var options = opts ? utils.assign({}, opts) : {};
@@ -348,6 +587,12 @@ module.exports = function (object, opts) {
     var allowDots = typeof options.allowDots === 'undefined' ? false : options.allowDots;
     var serializeDate = typeof options.serializeDate === 'function' ? options.serializeDate : defaults.serializeDate;
     var encodeValuesOnly = typeof options.encodeValuesOnly === 'boolean' ? options.encodeValuesOnly : defaults.encodeValuesOnly;
+    /** @type Charset */
+    var charset = options.charset || 'utf-8';
+    if (charset !== undefined && charset !== 'utf-8' && charset !== 'iso-8859-1') {
+        throw new Error('The charset option must be either utf-8, iso-8859-1, or undefined');
+    }
+
     if (typeof options.format === 'undefined') {
         options.format = formats['default'];
     } else if (!Object.prototype.hasOwnProperty.call(formats.formatters, options.format)) {
@@ -365,6 +610,9 @@ module.exports = function (object, opts) {
         objKeys = filter;
     }
 
+    /**
+     * @type {string[]}
+     */
     var keys = [];
 
     if (typeof obj !== 'object' || obj === null) {
@@ -409,18 +657,64 @@ module.exports = function (object, opts) {
             allowDots,
             serializeDate,
             formatter,
-            encodeValuesOnly
+            encodeValuesOnly,
+            charset
         ));
     }
 
     var joined = keys.join(delimiter);
     var prefix = options.addQueryPrefix === true ? '?' : '';
 
+    if (options.charsetSentinel) {
+        if (charset === 'iso-8859-1') {
+            // encodeURIComponent('&#10003;'), the "numeric entity" representation of a checkmark
+            prefix += 'utf8=%26%2310003%3B&';
+        } else {
+            // encodeURIComponent('✓')
+            prefix += 'utf8=%E2%9C%93&';
+        }
+    }
+
     return joined.length > 0 ? prefix + joined : '';
 };
 
 },{"./formats":1,"./utils":5}],5:[function(require,module,exports){
 'use strict';
+
+/**
+ * @typedef {string} Charset
+ * @enum ['iso-8859-1', 'utf-8']
+ */
+
+/**
+ * @callback Decoder
+ * @param str {string}
+ * @param decoder {function}
+ * @param charset {Charset}
+ * @returns {string}
+ */
+
+/**
+ * @callback Encoder
+ * @param str {string}
+ * @param defaultEncoder {Encoder}
+ * @param charset {Charset=}
+ * @returns {string}
+ */
+
+/** @typedef UtilOptionsInternalType
+ * @property allowPrototypes {boolean}
+ * @property arrayLimit {number}
+ *
+ * @typedef {UtilOptions & UtilOptionsInternalType} UtilOptionsInternal
+ */
+
+/**
+ * @typedef UtilOptions
+ * @property allowDots {boolean}
+ * @property charset {Charset}
+ * @property plainObjects {boolean}
+ */
 
 var has = Object.prototype.hasOwnProperty;
 
@@ -433,6 +727,10 @@ var hexTable = (function () {
     return array;
 }());
 
+/**
+ * @param queue {array}
+ * @returns {object}
+ */
 var compactQueue = function compactQueue(queue) {
     var obj;
 
@@ -456,6 +754,11 @@ var compactQueue = function compactQueue(queue) {
     return obj;
 };
 
+/**
+ * @param source {array}
+ * @param options {UtilOptionsInternal=}
+ * @returns {object}
+ */
 var arrayToObject = function arrayToObject(source, options) {
     var obj = options && options.plainObjects ? Object.create(null) : {};
     for (var i = 0; i < source.length; ++i) {
@@ -467,6 +770,12 @@ var arrayToObject = function arrayToObject(source, options) {
     return obj;
 };
 
+/**
+ * @param target {array | object}
+ * @param source {any=}
+ * @param options {UtilOptionsInternal=}
+ * @returns target | {object}
+ */
 var merge = function merge(target, source, options) {
     if (!source) {
         return target;
@@ -476,7 +785,7 @@ var merge = function merge(target, source, options) {
         if (Array.isArray(target)) {
             target.push(source);
         } else if (typeof target === 'object') {
-            if (options.plainObjects || options.allowPrototypes || !has.call(Object.prototype, source)) {
+            if ((options && (options.plainObjects || options.allowPrototypes)) || !has.call(Object.prototype, source)) {
                 target[source] = true;
             }
         } else {
@@ -522,6 +831,11 @@ var merge = function merge(target, source, options) {
     }, mergeTarget);
 };
 
+/**
+ * @param target {object}
+ * @param source {object}
+ * @returns target
+ */
 var assign = function assignSingleSource(target, source) {
     return Object.keys(source).reduce(function (acc, key) {
         acc[key] = source[key];
@@ -529,15 +843,25 @@ var assign = function assignSingleSource(target, source) {
     }, target);
 };
 
-var decode = function (str) {
+/** @type {Decoder} */
+var decode = function (str, decoder, charset) {
+    var strWithoutPlus = str.replace(/\+/g, ' ');
+    if (charset === 'iso-8859-1') {
+        // unescape never throws, no try...catch needed:
+        return strWithoutPlus.replace(/%[0-9a-f]{2}/gi, unescape);
+    }
+    // utf-8
     try {
-        return decodeURIComponent(str.replace(/\+/g, ' '));
+        return decodeURIComponent(strWithoutPlus);
     } catch (e) {
-        return str;
+        return strWithoutPlus;
     }
 };
 
-var encode = function encode(str) {
+/**
+ * @type {Encoder}
+ */
+var encode = function encode(str, defaultEncoder, charset) {
     // This code was originally written by Brian White (mscdex) for the io.js core querystring library.
     // It has been adapted here for stricter adherence to RFC 3986
     if (str.length === 0) {
@@ -545,6 +869,12 @@ var encode = function encode(str) {
     }
 
     var string = typeof str === 'string' ? str : String(str);
+
+    if (charset === 'iso-8859-1') {
+        return escape(string).replace(/%u[0-9a-f]{4}/gi, function ($0) {
+            return '%26%23' + parseInt($0.slice(2), 16) + '%3B';
+        });
+    }
 
     var out = '';
     for (var i = 0; i < string.length; ++i) {
@@ -589,6 +919,10 @@ var encode = function encode(str) {
     return out;
 };
 
+/**
+ * @param value {any}
+ * @returns {object}
+ */
 var compact = function compact(value) {
     var queue = [{ obj: { o: value }, prop: 'o' }];
     var refs = [];
@@ -611,10 +945,18 @@ var compact = function compact(value) {
     return compactQueue(queue);
 };
 
+/**
+ * @param obj {RegExp | any}
+ * @returns {boolean}
+ */
 var isRegExp = function isRegExp(obj) {
     return Object.prototype.toString.call(obj) === '[object RegExp]';
 };
 
+/**
+ * @param obj {any}
+ * @returns {boolean}
+ */
 var isBuffer = function isBuffer(obj) {
     if (obj === null || typeof obj === 'undefined') {
         return false;
